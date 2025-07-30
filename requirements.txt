@@ -1,0 +1,14 @@
+# Main App
+fastapi[all]
+pandas
+rapidfuzz
+fpdf2
+python-dotenv
+python-multipart
+
+# OCR Engine
+torch
+transformers
+opencv-python-headless
+pytesseract
+Pillow

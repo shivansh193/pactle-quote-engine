@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Pactle Quote Engine - Final</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; margin: 0; background-color: #f4f7f9; }
+        .header { padding: 10px 20px; background-color: white; border-bottom: 1px solid #ddd; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+        .main-content { display: flex; flex-grow: 1; overflow: hidden; }
+        .pane { flex: 1; padding: 1em; border-right: 1px solid #ddd; overflow-y: auto; background-color: white; display: flex; flex-direction: column;}
+        #preview-pane { border-right: none; }
+        textarea { width: 98%; height: 200px; font-family: monospace; border: 1px solid #ccc; padding: 5px; border-radius: 4px; margin-bottom: 10px; }
+        pre { flex-grow: 1; white-space: pre-wrap; word-wrap: break-word; background-color: #eef; padding: 10px; border-radius: 4px; font-size: 12px;}
+        button { padding: 8px 12px; background-color: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 14px;}
+        button:hover { background-color: #0056b3; }
+        h3 { margin-top: 0; color: #333; }
+        .controls { display: flex; gap: 15px; align-items: center; }
+        .button-group { display: flex; gap: 10px; }
+        #pdf-preview { width: 100%; flex-grow: 1; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h3>Pactle RFQ Processor</h3>
+        <div class="controls">
+            <label>Currency: <select id="currency-select"><option>INR</option><option>USD</option><option>EUR</option></select></label>
+            <label><input type="checkbox" id="approver-mode"> Approver Mode</label>
+        </div>
+        <div class="controls">
+            <input type="file" id="file-input" accept="image/*,.csv">
+            <button onclick=processFile()>Process File (Image/CSV)</button>
+        </div>
+    </div>
+    <div class="main-content">
+        <div class="pane" id="rfq-pane">
+            <h3>1. RFQ Input</h3>
+            <textarea id="rfq-text" placeholder="Paste RFQ text here, or process a file..."></textarea>
+            <div class="button-group">
+                <button onclick="generateQuoteFromText()">Generate Quote from Text</button>
+                <button onclick="download('pdf')">Download PDF</button>
+                <button onclick="download('csv')">Download CSV</button>
+            </div>
+        </div>
+        <div class="pane" id="json-pane">
+            <h3>2. API Response</h3>
+            <pre id="json-output">API responses will appear here...</pre>
+        </div>
+        <div class="pane" id="preview-pane">
+            <h3>3. PDF Preview</h3>
+            <iframe id="pdf-preview"></iframe>
+        </div>
+    </div>
+
+    <script>
+        let lastSuccessfulRfqText = '';
+        let lastSuccessfulCurrency = 'INR';
+
+        function showStatus(pane, message) {
+            document.getElementById(pane).textContent = message;
+        }
+
+        async function generateQuote(payload, isApproved) {
+            showStatus('json-output', 'Processing Quote...');
+            try {
+                const response = await fetch(`/generate-quote?is_approved=${isApproved}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                showStatus('json-output', JSON.stringify(data, null, 2));
+                if (response.ok) {
+                    lastSuccessfulRfqText = payload.rfq_text || (payload.chat_payload && payload.chat_payload.text);
+                    lastSuccessfulCurrency = payload.target_currency;
+                    previewPDF(data);
+                }
+            } catch (error) {
+                showStatus('json-output', `Error: ${error.message}`);
+            }
+        }
+
+        function generateQuoteFromText() {
+            const rfqText = document.getElementById('rfq-text').value;
+            const currency = document.getElementById('currency-select').value;
+            const isApproved = document.getElementById('approver-mode').checked;
+            
+            let payload = {};
+            try {
+                payload = { chat_payload: JSON.parse(rfqText), target_currency: currency };
+            } catch (e) {
+                payload = { rfq_text: rfqText, target_currency: currency };
+            }
+            generateQuote(payload, isApproved);
+        }
+
+        async function processFile() {
+            const fileInput = document.getElementById('file-input');
+            if (!fileInput.files.length) { alert('Please select a file first.'); return; }
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            let endpoint = '';
+
+            if (file.type.startsWith('image/')) {
+                endpoint = '/process-rfq-image';
+            } else if (file.name.toLowerCase().endsWith('.csv')) {
+                endpoint = '/process-rfq-csv';
+            } else {
+                alert('Unsupported file type. Please upload an image or a CSV.');
+                return;
+            }
+            
+            showStatus('json-output', `Processing ${file.name}... This may take a moment.`);
+            try {
+                const response = await fetch(endpoint, { method: 'POST', body: formData });
+                const data = await response.json();
+                showStatus('json-output', JSON.stringify(data, null, 2));
+
+                if (response.ok) {
+                    const quoteData = data.generated_quote;
+                    lastSuccessfulRfqText = data.extracted_rfq_text || data.original_csv_text;
+                    lastSuccessfulCurrency = quoteData.currency;
+                    document.getElementById('rfq-text').value = lastSuccessfulRfqText;
+                    previewPDF(quoteData);
+                }
+            } catch (error) {
+                showStatus('json-output', `Error: ${error.message}`);
+            }
+        }
+
+        function previewPDF(quoteData) {
+            const isApproved = document.getElementById('approver-mode').checked;
+            const needsReview = quoteData.lines.some(line => !line.resolved);
+            const pdfFrame = document.getElementById('pdf-preview');
+
+            if (needsReview && !isApproved) {
+                pdfFrame.src = "about:blank"; // Clear preview if approval is needed
+                return;
+            }
+            
+            const payload = { rfq_text: lastSuccessfulRfqText, target_currency: lastSuccessfulCurrency };
+            fetch(`/generate-quote?response_format=pdf&is_approved=true`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(res => res.blob())
+            .then(blob => {
+                const url = URL.createObjectURL(blob);
+                pdfFrame.src = url;
+            });
+        }
+        
+        async function download(format) {
+             if (!lastSuccessfulRfqText) { alert('Please generate or process a quote first.'); return; }
+             const isApproved = document.getElementById('approver-mode').checked;
+             
+             const payload = { rfq_text: lastSuccessfulRfqText, target_currency: lastSuccessfulCurrency };
+             const response = await fetch(`/generate-quote?response_format=${format}&is_approved=${isApproved}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+             });
+             if (!response.ok) {
+                const errorData = await response.json();
+                alert(`Could not download file: ${errorData.detail}`);
+                return;
+             }
+             const blob = await response.blob();
+             const url = window.URL.createObjectURL(blob);
+             const a = document.createElement('a');
+             a.href = url;
+             a.download = `quote.${format}`;
+             document.body.appendChild(a);
+             a.click();
+             window.URL.revokeObjectURL(url);
+             a.remove();
+        }
+    </script>
+</body>
+</html>
